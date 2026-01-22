@@ -12,6 +12,8 @@ failed to execute transaction kernel program
 event_id: 3544352630057744777
 ```
 
+![Webclient Error Screenshot](error-screenshot.png)
+
 ## What This Test Does
 
 1. Creates two faucets (GOLD and SILVER)
