@@ -136,6 +136,7 @@ export default function PartialFillTestPage() {
         NoteRecipient,
         NoteTag,
         NoteExecutionHint,
+        NoteExecutionMode,
         NoteInputs,
         OutputNote,
         TransactionRequestBuilder,
@@ -175,6 +176,32 @@ export default function PartialFillTestPage() {
       // Helper: Convert hex string to AccountId (avoids WASM GC issues)
       const { AccountId } = await import("@demox-labs/miden-sdk");
       const toAccountId = (hex: string) => AccountId.fromHex(hex);
+
+      /**
+       * Build swap tag from asset pair (per Miden team feedback)
+       * Tag payload is constructed by taking asset tags (8 bits of each faucet ID prefix)
+       * and concatenating them: offered_asset_tag + requested_asset_tag.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const buildSwapTag = (noteType: any, offeredFaucetId: any, requestedFaucetId: any) => {
+        const SWAP_USE_CASE_ID = 0;
+
+        // Get bits 56..63 (top 8 bits) from each faucet ID prefix
+        const offeredPrefix = offeredFaucetId.prefix().asInt();
+        const offeredTag = Number((offeredPrefix >> BigInt(56)) & BigInt(0xFF));
+
+        const requestedPrefix = requestedFaucetId.prefix().asInt();
+        const requestedTag = Number((requestedPrefix >> BigInt(56)) & BigInt(0xFF));
+
+        // Payload = offered_tag (high 8 bits) | requested_tag (low 8 bits)
+        const payload = (offeredTag << 8) | requestedTag;
+
+        if (noteType === NoteType.Public) {
+          return NoteTag.forPublicUseCase(SWAP_USE_CASE_ID, payload, NoteExecutionMode.newLocal());
+        } else {
+          return NoteTag.forLocalUseCase(SWAP_USE_CASE_ID, payload);
+        }
+      };
 
       // GOLD faucet (offered token)
       log("");
@@ -417,8 +444,10 @@ export default function PartialFillTestPage() {
 
       // Build note inputs (14 felts) - use fresh AccountId from hex
       const makerIdFresh = toAccountId(makerIdHex);
-      const swappTag = NoteTag.fromAccountId(makerIdFresh);
-      const p2idTag = NoteTag.fromAccountId(makerIdFresh);
+      // CRITICAL FIX: Use buildSwapTag from asset pair, NOT fromAccountId
+      // Per Miden team feedback: swap tags must encode offered/requested faucet prefixes
+      const swappTag = buildSwapTag(NoteType.Public, toAccountId(goldFaucetIdHex), toAccountId(silverFaucetIdHex));
+      const p2idTag = NoteTag.fromAccountId(makerIdFresh); // P2ID goes to maker, so this stays
       const creatorPrefix = makerIdFresh.prefix().asInt();
       const creatorSuffix = makerIdFresh.suffix().asInt();
 
@@ -484,12 +513,21 @@ export default function PartialFillTestPage() {
       const swappNote = new Note(noteAssets, noteMetadata, recipient);
       const swappNoteId = swappNote.id().toString();
       setState((prev) => ({ ...prev, swappNoteId }));
-      log(`SWAPP tag u32: ${swappTag.asU32()} hex: 0x${swappTag.asU32().toString(16)} toString(): ${swappTag.toString()}`);
+
+      // Log SWAPP tag details (CRITICAL FIX: now using buildSwapTag from asset pair)
+      log("");
+      log("=== SWAPP TAG (FIXED - using buildSwapTag from asset pair) ===");
+      const goldPrefix = toAccountId(goldFaucetIdHex).prefix().asInt();
+      const silverPrefix = toAccountId(silverFaucetIdHex).prefix().asInt();
+      log(`  GOLD faucet prefix top 8 bits:   0x${((goldPrefix >> BigInt(56)) & BigInt(0xFF)).toString(16)}`);
+      log(`  SILVER faucet prefix top 8 bits: 0x${((silverPrefix >> BigInt(56)) & BigInt(0xFF)).toString(16)}`);
+      log(`  SWAPP tag u32: ${swappTag.asU32()} (0x${swappTag.asU32().toString(16)})`);
+      log(`  SWAPP tag toString(): ${swappTag.toString()}`);
 
       log("");
       log("=== PSWAP NOTE CREATED ===");
       log(`  Note ID: ${swappNoteId}`);
-      log(`  Tag: ${swappTag.asU32()}`);
+      log(`  Tag: ${swappTag.asU32()} (computed from asset pair, NOT fromAccountId)`);
 
       // Submit SWAPP creation
       const outputNote = OutputNote.full(swappNote);
@@ -596,41 +634,33 @@ export default function PartialFillTestPage() {
       log("--- Attempting fill with AUTHENTICATED input note ---");
       log("(This matches the Rust test approach)");
 
-      // Check what notes the taker can consume
-      const takerConsumableNotes = await client.getConsumableNotes(toAccountId(takerIdHex));
-      log(`  Taker has ${takerConsumableNotes.length} consumable notes`);
+      // KEY FIX #1: Rust uses get_consumable_notes(None) - no account filter
+      // Try to get ALL consumable notes without filtering by account
+      log("  Getting ALL consumable notes (no account filter, like Rust)...");
+      let allConsumableNotes;
+      try {
+        // Try calling without argument first (might work like Rust's None)
+        allConsumableNotes = await (client as any).getConsumableNotes();
+      } catch {
+        // Fallback: get notes for both accounts
+        const makerNotes = await client.getConsumableNotes(toAccountId(makerIdHex));
+        const takerNotes = await client.getConsumableNotes(toAccountId(takerIdHex));
+        allConsumableNotes = [...makerNotes, ...takerNotes];
+      }
+      log(`  Found ${allConsumableNotes.length} total consumable notes`);
 
-      for (const n of takerConsumableNotes) {
+      for (const n of allConsumableNotes) {
         const noteRecord = n.inputNoteRecord();
         log(`    - ${noteRecord.id().toString()}`);
       }
 
       let swappNoteFromStore = null;
-      for (const n of takerConsumableNotes) {
+      for (const n of allConsumableNotes) {
         const noteRecord = n.inputNoteRecord();
         if (noteRecord.id().toString() === swappNoteId) {
           swappNoteFromStore = noteRecord;
-          log(
-            `  Found SWAPP note consumable by taker: ${noteRecord.id().toString()}`,
-          );
+          log(`  Found SWAPP note in consumable notes: ${noteRecord.id().toString()}`);
           break;
-        }
-      }
-
-      if (!swappNoteFromStore) {
-        log("  WARNING: SWAPP note not consumable by taker!");
-        log("  Checking if it exists in maker's view...");
-        const makerConsumableNotes = await client.getConsumableNotes(toAccountId(makerIdHex));
-        for (const n of makerConsumableNotes) {
-          const noteRecord = n.inputNoteRecord();
-          if (noteRecord.id().toString() === swappNoteId) {
-            log(
-              `  Found SWAPP note in maker's consumable: ${noteRecord.id().toString()}`,
-            );
-            // Use the maker's copy (has inclusion proof) to build the input
-            swappNoteFromStore = noteRecord;
-            break;
-          }
         }
       }
 
@@ -653,55 +683,201 @@ export default function PartialFillTestPage() {
 
       await client.syncState();
 
+      // DEBUG: Final balance check before fill
+      log("");
+      log("--- FINAL DEBUG: Taker state before fill ---");
+      const takerAcctFinal = await client.getAccount(toAccountId(takerIdHex));
+      if (takerAcctFinal) {
+        const takerAssetsFinal = takerAcctFinal.vault().fungibleAssets();
+        log(`  Taker vault has ${takerAssetsFinal.length} asset(s):`);
+        for (const asset of takerAssetsFinal) {
+          const faucetId = asset.faucetId().toString();
+          const amount = asset.amount();
+          const isSilver = faucetId === silverFaucetIdHex;
+          log(`    ${faucetId}: ${amount}${isSilver ? " (SILVER - NEEDED FOR FILL)" : ""}`);
+        }
+        if (takerAssetsFinal.length === 0) {
+          log("  *** CRITICAL: Taker has NO assets! Cannot fill SWAPP ***");
+        }
+      } else {
+        log("  *** CRITICAL: Could not get taker account! ***");
+      }
+
+      // Check if we have the SWAPP note
+      log("");
+      log("--- Checking SWAPP note state ---");
       const swappNoteIdHex =
         swappNoteId.startsWith("0x") ? swappNoteId : `0x${swappNoteId}`;
+      log(`  SWAPP note ID: ${swappNoteIdHex}`);
+
+      // Try to get the note from the store
+      const noteFromStore = await client.getInputNote(swappNoteIdHex);
+      if (noteFromStore) {
+        log(`  SWAPP note found in store`);
+        const noteAssets = noteFromStore.details()?.assets();
+        if (noteAssets) {
+          const assets = noteAssets.fungibleAssets();
+          log(`  Note has ${assets.length} asset(s):`);
+          for (const asset of assets) {
+            log(`    ${asset.faucetId().toString()}: ${asset.amount()}`);
+          }
+        }
+      } else {
+        log("  *** WARNING: SWAPP note NOT found in store via getInputNote ***");
+      }
+
       const noteIdObj = NoteId.fromHex(swappNoteIdHex);
       const noteIdAndArgs = new NoteIdAndArgs(noteIdObj, noteArgs);
 
+      log("");
+      log("--- Building fill transaction with expected future notes ---");
+      log(`  Note args (fill amount): [0, 0, 0, ${FILL_AMOUNT}]`);
+      log(`  Using withAuthenticatedInputNotes with note ID: ${swappNoteIdHex}`);
+
+      // Per Philipp's feedback: fill transaction needs withExpectedFutureNotes
+      // For partial fill, PSWAP creates:
+      // 1. P2ID note to maker (fill_amount of SILVER)
+      // 2. Leftover SWAPP note (remaining GOLD)
+
+      // Import additional types for expected future notes (NoteRecipient already imported above)
+      const {
+        NoteDetails,
+        NoteDetailsAndTag,
+        NoteDetailsAndTagArray,
+        NoteRecipientArray,
+      } = sdk as any;
+
+      // Use the already-calculated leftover amounts from above
+      log(`  Expected P2ID: ${FILL_AMOUNT} SILVER to maker`);
+      log(`  Expected leftover SWAPP: ${leftoverOffered} GOLD for ${leftoverRequested} SILVER`);
+
+      // KEY FIX #2: Build BOTH expected notes (like Rust)
+      // 1. P2ID note to maker (SILVER payment)
+      // 2. Leftover SWAPP note (remaining GOLD)
+
+      // Build expected P2ID note (SILVER to maker)
+      const p2idSilverAsset = new FungibleAsset(toAccountId(silverFaucetIdHex), FILL_AMOUNT);
+      const p2idNoteAssets = new NoteAssets([p2idSilverAsset]);
+      const p2idMakerId = toAccountId(makerIdHex);
+      const p2idNoteTag = NoteTag.fromAccountId(p2idMakerId);
+
+      // Create P2ID note using the SDK helper
+      const expectedP2idNote = Note.createP2IDNote(
+        toAccountId(takerIdHex),  // sender (taker)
+        p2idMakerId,               // target (maker)
+        p2idNoteAssets,
+        NoteType.Public,
+        new Felt(BigInt(0))        // aux
+      );
+      const p2idRecipient = expectedP2idNote.recipient();
+      const p2idNoteDetails = new NoteDetails(p2idNoteAssets, p2idRecipient);
+      const p2idDetailsAndTag = new NoteDetailsAndTag(p2idNoteDetails, p2idNoteTag);
+      log(`  Built expected P2ID note details`);
+
+      // Build expected leftover SWAPP note details
+      // Assets: leftover GOLD
+      const leftoverGoldAsset = new FungibleAsset(toAccountId(goldFaucetIdHex), leftoverOffered);
+      const leftoverNoteAssets = new NoteAssets([leftoverGoldAsset]);
+
+      // The leftover SWAPP will have the same tag (computed from asset pair)
+      // and same script, but updated inputs
+      const leftoverSwappTag = buildSwapTag(NoteType.Public, toAccountId(goldFaucetIdHex), toAccountId(silverFaucetIdHex));
+
+      // Build the leftover note inputs (updated with remaining amounts)
+      const leftoverSilverFaucetId = toAccountId(silverFaucetIdHex);
+      const leftoverReqSuffix = leftoverSilverFaucetId.suffix().asInt();
+      const leftoverReqPrefix = leftoverSilverFaucetId.prefix().asInt();
+      const leftoverMakerId = toAccountId(makerIdHex);
+      const leftoverCreatorPrefix = leftoverMakerId.prefix().asInt();
+      const leftoverCreatorSuffix = leftoverMakerId.suffix().asInt();
+
+      const leftoverInputsArray = [
+        new Felt(leftoverRequested), // 0: remaining requested_amount (750)
+        new Felt(BigInt(0)), // 1: zero
+        new Felt(BigInt(leftoverReqSuffix)), // 2: faucet_suffix
+        new Felt(BigInt(leftoverReqPrefix)), // 3: faucet_prefix
+        new Felt(BigInt(leftoverSwappTag.asU32())), // 4: swapp_tag
+        new Felt(BigInt(p2idTag.asU32())), // 5: p2id_tag
+        new Felt(BigInt(0)), // 6: empty
+        new Felt(BigInt(0)), // 7: empty
+        new Felt(BigInt(1)), // 8: swap_count (incremented)
+        new Felt(BigInt(0)), // 9: expiration_block
+        new Felt(BigInt(0)), // 10: empty
+        new Felt(BigInt(0)), // 11: empty
+        new Felt(BigInt(leftoverCreatorPrefix)), // 12: creator_prefix
+        new Felt(BigInt(leftoverCreatorSuffix)), // 13: creator_suffix
+      ];
+
+      const leftoverNoteInputs = new NoteInputs(
+        new MidenArrays.FeltArray(leftoverInputsArray),
+      );
+
+      // Get the PSWAP script (same as original)
+      const leftoverNoteScript = builder.compileNoteScript(PSWAP_MASM);
+
+      // Serial number for leftover = original + 1 (as per PSWAP script)
+      const leftoverSerialNum = new Word(
+        new BigUint64Array([BigInt(2), BigInt(2), BigInt(3), BigInt(4)]),
+      );
+
+      // Build recipient for leftover SWAPP
+      const leftoverRecipient = new NoteRecipient(leftoverSerialNum, leftoverNoteScript, leftoverNoteInputs);
+
+      // Create NoteDetails for expected leftover SWAPP
+      const leftoverNoteDetails = new NoteDetails(leftoverNoteAssets, leftoverRecipient);
+      const leftoverDetailsAndTag = new NoteDetailsAndTag(leftoverNoteDetails, leftoverSwappTag);
+
+      log(`  Built expected future note details for leftover SWAPP`);
+
+      // KEY FIX #3: Both recipients via withExpectedOutputRecipients (like Rust)
+      // The PSWAP script creates two output notes:
+      // 1. P2ID note to maker (with fill_amount SILVER)
+      // 2. Leftover SWAPP note (with remaining GOLD)
+
+      const expectedRecipients = new NoteRecipientArray([
+        p2idRecipient,      // P2ID recipient (maker gets SILVER)
+        leftoverRecipient,  // Leftover SWAPP recipient
+      ]);
+
+      log(`  Built expected output recipients (P2ID + leftover SWAPP)`);
+
+      // Build the fill transaction with ALL of Philipp's requirements:
+      // 1. withAuthenticatedInputNotes - the SWAPP note being consumed
+      // 2. withExpectedFutureNotes - BOTH P2ID and leftover (like Rust)
+      // 3. withExpectedOutputRecipients - BOTH recipients (like Rust)
       const fillTxReq = new TransactionRequestBuilder()
         .withAuthenticatedInputNotes(new NoteIdAndArgsArray([noteIdAndArgs]))
+        .withExpectedFutureNotes(new NoteDetailsAndTagArray([p2idDetailsAndTag, leftoverDetailsAndTag]))
+        .withExpectedOutputRecipients(expectedRecipients)
         .build();
 
       log("");
-      log("--- Submitting Fill Transaction ---");
+      log("--- Submitting Fill Transaction via submitNewTransaction ---");
+      log("  (Per Philipp's feedback: use submitNewTransaction instead of manual execute/prove/submit)");
 
-      const fillTxResult = await client.executeTransaction(toAccountId(takerIdHex), fillTxReq);
-      log(`  Transaction executed`);
-
-      const fillTxProven = await client.proveTransaction(fillTxResult);
-      log(`  Transaction proven`);
-
-      const fillTxHeight = await client.submitProvenTransaction(
-        fillTxProven,
-        fillTxResult,
-      );
-      log(`  Transaction submitted at height: ${fillTxHeight}`);
-
-      await client.applyTransaction(fillTxResult, fillTxHeight);
-      log(`  Transaction applied`);
-
-      // Extract output notes
-      const outputNotes = fillTxResult.executedTransaction().outputNotes();
-      log("");
-      log("--- Fill Output Notes ---");
-      log(`  Number of output notes: ${outputNotes.numNotes()}`);
-
-      const notes = outputNotes.notes();
-      for (let i = 0; i < notes.length; i++) {
-        const noteId = notes[i].id().toString();
-        log(`  Output note ${i}: ${noteId}`);
-        if (i === 0) {
-          setState((prev) => ({ ...prev, p2idNoteId: noteId }));
-        } else if (i === 2) {
-          setState((prev) => ({ ...prev, leftoverNoteId: noteId }));
-        }
-      }
+      // Use submitNewTransaction as Philipp recommended
+      // This handles execute + prove + submit internally and returns TransactionId
+      const fillTxId = await client.submitNewTransaction(toAccountId(takerIdHex), fillTxReq);
+      log(`  Transaction submitted via submitNewTransaction`);
+      log(`  Transaction ID: ${fillTxId.toHex()}`);
 
       // Wait for transaction to commit
       log("");
       log("Waiting for fill transaction to commit (12s)...");
       await new Promise((r) => setTimeout(r, 12000));
       await client.syncState();
+
+      // Check taker's balance after fill to verify it worked
+      log("");
+      log("--- Verifying fill results ---");
+      const takerAcctAfter = await client.getAccount(toAccountId(takerIdHex));
+      if (takerAcctAfter) {
+        const takerAssetsAfter = takerAcctAfter.vault().fungibleAssets();
+        log(`  Taker vault after fill:`);
+        for (const asset of takerAssetsAfter) {
+          log(`    ${asset.faucetId().toString()}: ${asset.amount()}`);
+        }
+      }
 
       // =========================================================================
       // PHASE 7: Maker Consumes P2ID Note
