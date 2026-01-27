@@ -751,28 +751,39 @@ export default function PartialFillTestPage() {
       log(`  Expected P2ID: ${FILL_AMOUNT} SILVER to maker`);
       log(`  Expected leftover SWAPP: ${leftoverOffered} GOLD for ${leftoverRequested} SILVER`);
 
-      // KEY FIX #2: Build BOTH expected notes (like Rust)
-      // 1. P2ID note to maker (SILVER payment)
-      // 2. Leftover SWAPP note (remaining GOLD)
+      // KEY FIX #2: Build BOTH expected notes with EXACT serial numbers (like Rust)
 
-      // Build expected P2ID note (SILVER to maker)
+      // Import Rpo256 and NoteScript for proper computation
+      const { Rpo256, NoteScript } = sdk as any;
+
+      // Original swap serial number (must match what we used when creating the SWAPP)
+      const swapSerialFelts = [new Felt(BigInt(1)), new Felt(BigInt(2)), new Felt(BigInt(3)), new Felt(BigInt(4))];
+      const nextSwapCount = BigInt(1); // After this fill, swap_count becomes 1
+
+      // Compute P2ID serial: hmerge(swap_serial, [swap_count, 0, 0, 0])
+      // hmerge = Rpo256.hashElements([...word1, ...word2])
+      const swapCountFelts = [new Felt(nextSwapCount), new Felt(BigInt(0)), new Felt(BigInt(0)), new Felt(BigInt(0))];
+      const p2idSerialWord = Rpo256.hashElements(new MidenArrays.FeltArray([...swapSerialFelts, ...swapCountFelts]));
+      log(`  Computed P2ID serial via hmerge(swap_serial, [swap_count, 0, 0, 0])`);
+
+      // Build P2ID recipient (matches Rust's build_p2id_recipient):
+      // NoteRecipient::new(serial_num, p2id_script, [target.suffix(), target.prefix()])
+      const p2idMakerId = toAccountId(makerIdHex);
+      const p2idScript = NoteScript.p2id();
+      const p2idNoteInputs = new NoteInputs(new MidenArrays.FeltArray([
+        new Felt(p2idMakerId.suffix().asInt()),  // target.suffix() first
+        new Felt(p2idMakerId.prefix().asInt()),  // target.prefix() second
+      ]));
+      const p2idRecipient = new NoteRecipient(p2idSerialWord, p2idScript, p2idNoteInputs);
+
+      // Build P2ID note assets and tag
       const p2idSilverAsset = new FungibleAsset(toAccountId(silverFaucetIdHex), FILL_AMOUNT);
       const p2idNoteAssets = new NoteAssets([p2idSilverAsset]);
-      const p2idMakerId = toAccountId(makerIdHex);
       const p2idNoteTag = NoteTag.fromAccountId(p2idMakerId);
 
-      // Create P2ID note using the SDK helper
-      const expectedP2idNote = Note.createP2IDNote(
-        toAccountId(takerIdHex),  // sender (taker)
-        p2idMakerId,               // target (maker)
-        p2idNoteAssets,
-        NoteType.Public,
-        new Felt(BigInt(0))        // aux
-      );
-      const p2idRecipient = expectedP2idNote.recipient();
       const p2idNoteDetails = new NoteDetails(p2idNoteAssets, p2idRecipient);
       const p2idDetailsAndTag = new NoteDetailsAndTag(p2idNoteDetails, p2idNoteTag);
-      log(`  Built expected P2ID note details`);
+      log(`  Built expected P2ID note with computed serial`);
 
       // Build expected leftover SWAPP note details
       // Assets: leftover GOLD
@@ -815,9 +826,10 @@ export default function PartialFillTestPage() {
       // Get the PSWAP script (same as original)
       const leftoverNoteScript = builder.compileNoteScript(PSWAP_MASM);
 
-      // Serial number for leftover = original + 1 (as per PSWAP script)
+      // Serial number for leftover = original with last element + 1 (as per Rust code)
+      // Original was [1, 2, 3, 4], so leftover is [1, 2, 3, 5]
       const leftoverSerialNum = new Word(
-        new BigUint64Array([BigInt(2), BigInt(2), BigInt(3), BigInt(4)]),
+        new BigUint64Array([BigInt(1), BigInt(2), BigInt(3), BigInt(5)]),
       );
 
       // Build recipient for leftover SWAPP
