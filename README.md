@@ -1,8 +1,20 @@
-# PSWAP Partial Fill Example
+# PSWAP Partial Fill Examples
 
-Working example of partial swap note consumption using the Miden WebClient SDK.
+Working examples of partial swap note consumption using the Miden WebClient SDK.
 
-## What This Test Does
+## Test Pages
+
+### `/partial` - Public PSWAP (original)
+Tests partial fills with PUBLIC notes. All notes are visible on-chain.
+
+### `/private-partial` - Private PSWAP (new)
+Tests partial fills with PRIVATE notes. Key differences:
+- Uses `PSWAP_PRIVATE_MASM` with 15 inputs (includes `NOTE_TYPE_OUTPUT`)
+- Creates PSWAP note with `NoteType.Private`
+- Output notes (P2ID + leftover) inherit privacy from `NOTE_TYPE_OUTPUT` input
+- Notes are NOT visible on midenscan.com
+
+## What The Tests Do
 
 1. Creates two faucets (GOLD and SILVER)
 2. Creates two wallets (Maker and Taker)
@@ -21,12 +33,16 @@ pnpm install
 pnpm dev
 ```
 
-Navigate to http://localhost:3000/partial and click "Run Test".
+Navigate to:
+- http://localhost:3000/partial - Public PSWAP test
+- http://localhost:3000/private-partial - Private PSWAP test
 
 ## Files
 
-- `app/partial/page.tsx` - Test page that runs the full PSWAP flow
-- `lib/masm/pswap.ts` - PSWAP note script (MASM assembly)
+- `app/partial/page.tsx` - Test page for PUBLIC PSWAP flow
+- `app/private-partial/page.tsx` - Test page for PRIVATE PSWAP flow
+- `lib/masm/pswap.ts` - Original PSWAP note script (hardcoded PUBLIC_NOTE)
+- `lib/masm/pswap-private.ts` - Modified PSWAP script with dynamic NOTE_TYPE_OUTPUT
 
 ## Key Implementation Details
 
@@ -47,8 +63,46 @@ The following were required to make partial fills work with the WebClient:
 - `@demox-labs/miden-sdk@0.12.5`
 - Next.js 16 (for WASM support)
 
+## Private PSWAP Implementation
+
+The key change to support private output notes is in the MASM script:
+
+### Original (`pswap.ts`):
+```masm
+const.PUBLIC_NOTE=1
+...
+push.PUBLIC_NOTE  # Always creates PUBLIC output notes
+```
+
+### Modified (`pswap-private.ts`):
+```masm
+const.NOTE_TYPE_OUTPUT_INPUT = 0x000E  # Input index 14
+...
+mem_load.NOTE_TYPE_OUTPUT_INPUT  # Reads note type from input
+```
+
+This allows the caller to specify whether output notes (P2ID payback + leftover SWAPP) should be:
+- `0` = Private (not visible on-chain)
+- `1` = Public (visible on-chain)
+
+### Note Inputs Layout (15 felts):
+```
+0-3:   REQUESTED_ASSET_WORD [amount, 0, suffix, prefix]
+4:     SWAPP_TAG
+5:     P2ID_TAG
+6-7:   Empty (reserved)
+8:     SWAP_COUNT
+9:     EXPIRATION_BLOCK
+10-11: Empty (reserved)
+12:    CREATOR_PREFIX
+13:    CREATOR_SUFFIX
+14:    NOTE_TYPE_OUTPUT  <-- NEW (0=Private, 1=Public)
+```
+
 ## Notes
 
-- The test uses public accounts and notes for simplicity
+- The `/partial` test uses public accounts and notes for simplicity
+- The `/private-partial` test uses private wallets and notes
 - Wait times are included to allow transactions to commit on testnet
 - AccountIds are stored as hex strings and converted back when needed (to avoid WASM GC issues)
+- Private notes require out-of-band sharing (post office or direct export)
