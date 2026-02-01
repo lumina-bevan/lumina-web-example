@@ -490,7 +490,7 @@ export default function PrivatePartialFillTestPage() {
       ];
       for (let i = 0; i < noteInputsArray.length; i++) {
         const val = noteInputsArray[i].asInt();
-        const extra = i === 14 ? (val === BigInt(0) ? " (PRIVATE)" : " (PUBLIC)") : "";
+        const extra = i === 14 ? (val === BigInt(2) ? " (PRIVATE)" : " (PUBLIC)") : "";
         log(
           `  input[${i.toString().padStart(2)}] (${inputNames[i].padEnd(16)}): ${val.toString().padStart(20)} (0x${val.toString(16).padStart(16, "0")})${extra}`,
         );
@@ -543,25 +543,17 @@ export default function PrivatePartialFillTestPage() {
       log("");
       log("  PRIVATE SWAPP transaction submitted");
 
-      // Since this is a PRIVATE note, we need to share it with the taker
-      // In production, this would be done via post office or direct sharing
-      // For testing, we'll serialize the note and import it
+      // For PRIVATE notes, we use withUnauthenticatedInputNotes with the full Note object
+      // In production, the note would be shared via post office or direct export
+      // For this test, we keep the swappNote object and pass it directly to the transaction
       log("");
-      log("--- PRIVATE NOTE: Exporting for sharing with taker ---");
+      log("--- PRIVATE NOTE: Will use withUnauthenticatedInputNotes ---");
+      log("  (Private notes require full Note object, not just note ID)");
 
-      // Export the note data
-      const noteData = swappNote.serialize();
-      log(`  Serialized note: ${noteData.length} bytes`);
-
-      // Import note into taker's client view
-      // In real usage, taker would receive this via post office or direct transfer
-      await client.importInputNote(noteData, false);
-      log("  Note imported into local store (simulating sharing)");
-
-      // Wait a bit for state to settle
+      // Wait for SWAPP creation to commit
       log("");
-      log("Waiting for SWAPP to be processable (5s)...");
-      await new Promise((r) => setTimeout(r, 5000));
+      log("Waiting for SWAPP creation to commit (12s)...");
+      await new Promise((r) => setTimeout(r, 12000));
       await client.syncState();
 
       // =========================================================================
@@ -611,7 +603,7 @@ export default function PrivatePartialFillTestPage() {
       log("--- Building fill transaction with PRIVATE expected future notes ---");
 
       const sdk = await import("@demox-labs/miden-sdk");
-      const { NoteId, NoteIdAndArgs, NoteIdAndArgsArray, NoteDetails, NoteDetailsAndTag, NoteDetailsAndTagArray, NoteRecipientArray, Rpo256, NoteScript } = sdk as any;
+      const { NoteDetails, NoteDetailsAndTag, NoteDetailsAndTagArray, NoteRecipientArray, Rpo256, NoteScript } = sdk as any;
 
       // Compute P2ID serial
       const swapSerialFelts = [new Felt(BigInt(1)), new Felt(BigInt(2)), new Felt(BigInt(3)), new Felt(BigInt(4))];
@@ -688,13 +680,16 @@ export default function PrivatePartialFillTestPage() {
         leftoverRecipient,
       ]);
 
-      // Build transaction
-      const swappNoteIdHex = swappNoteId.startsWith("0x") ? swappNoteId : `0x${swappNoteId}`;
-      const noteIdObj = NoteId.fromHex(swappNoteIdHex);
-      const noteIdAndArgs = new NoteIdAndArgs(noteIdObj, noteArgs);
+      // Build transaction using UNAUTHENTICATED input (for private notes)
+      // This requires the full Note object, not just the note ID
+      // Per Miden engineer: "You can use .withUnauthenticatedInputNotes() even if the note is authenticated"
+      const { NoteAndArgs } = sdk as any;
+      const noteAndArgs = new NoteAndArgs(swappNote, noteArgs);
+
+      log(`  Using withUnauthenticatedInputNotes with full Note object`);
 
       const fillTxReq = new TransactionRequestBuilder()
-        .withAuthenticatedInputNotes(new NoteIdAndArgsArray([noteIdAndArgs]))
+        .withUnauthenticatedInputNotes(new MidenArrays.NoteAndArgsArray([noteAndArgs]))
         .withExpectedFutureNotes(new NoteDetailsAndTagArray([p2idDetailsAndTag, leftoverDetailsAndTag]))
         .withExpectedOutputRecipients(expectedRecipients)
         .build();

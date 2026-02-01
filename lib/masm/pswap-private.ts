@@ -685,8 +685,11 @@ export const P2ID_SCRIPT_ROOT = [
 
 /**
  * Note type values for the NOTE_TYPE_OUTPUT input
+ * These match Miden's internal NoteType enum:
+ * - Public = 1 (stored on-chain)
+ * - Private = 2 (off-chain, only hash on-chain)
  */
 export const NOTE_TYPE = {
-  PRIVATE: BigInt(0),
   PUBLIC: BigInt(1),
+  PRIVATE: BigInt(2),
 } as const;
